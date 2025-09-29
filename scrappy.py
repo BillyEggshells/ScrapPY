@@ -1,355 +1,252 @@
 import os
 import requests
-from bs4 import BeautifulSoup
+from bs4 import BeautifulSoup as BullShit4
 from urllib.parse import urljoin, urlparse
 import time
-import hashlib
+import hashlib as hashemeroids
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
-INPUT_DELAY = 0.5  # Delay input so it doesn’t go crazy fast
+INPUT_DELAY = 0.25
 SAVE_DIR = "scraped_texts"
-os.makedirs(SAVE_DIR, exist_ok=True)  # Make sure save folder exists
+os.makedirs(SAVE_DIR, exist_ok=True)
+
+# Colors
+RED = '\033[31m'
+BLUE = "\033[34m"
+RESET = '\033[0m'
+BOLD = '\033[1m'
+
+# Session
+session = requests.Session()
+session.headers.update({
+    "User-agent": "CAM_WithaPrettyCoolScraper:D",
+    "X-Greeting": "Hi from your friendly scrapper! excuse me if i spam, im new ot python! :D",
+    "From": "A random freshman goober... :D.test",
+})
 
 def delayed_input(prompt):
-   time.sleep(INPUT_DELAY)  # Chill a sec before input
-   return input(prompt)
+    time.sleep(INPUT_DELAY)
+    return input(prompt)
 
 def clear_screen():
-   os.system('cls' if os.name == 'nt' else 'clear')  # Clear the damn screen
-
-def get_filename_from_url(url):
-   parsed = urlparse(url)
-   return os.path.basename(parsed.path) or url  # Get filename from URL path or fallback
+    print("\033[H\033[2J")
 
 def safe_filename(url):
-   """Make a safe-ass filename using SHA256."""
-   h = hashlib.sha256(url.encode()).hexdigest()
-   return f"{h}.txt"
+    h = hashemeroids.sha256(url.encode()).hexdigest()
+    return f"{h}.txt"
 
 def save_scraped_data_to_file(url, data):
-   filename = safe_filename(url)
-   filepath = os.path.join(SAVE_DIR, filename)
-   print(f"[DEBUG] Saving data for {url} into file {filepath}")
+    filename = safe_filename(url)
+    filepath = os.path.join(SAVE_DIR, filename)
+    print(f"[DEBUG] Saving {url} -> {filepath}")
+    content = f"URL: {url}\nTit: {data.get('Tit', 'No title')}\nHTML length: {data.get('HTML length', 'N/A')}\n\n"
+    content += "=== HTML Code ===\n" + data.get('HTML code', '') + "\n\n"
+    content += "=== Text Content ===\n" + data.get('Text content', '') + "\n\n"
+    content += "=== Links ===\n" + "\n".join(data.get('Links', [])) + "\n"
+    content += "=== Features ===\n" + "\n".join(data.get('Features', [])) + "\n"
+    content += "=== Images ===\n" + "\n".join(data.get('Images (filenames)', [])) + "\n"
+    content += "=== Meta Tags ===\n" + "\n".join(f"{k}: {v}" for k,v in data.get('Meta tags', {}).items()) + "\n"
+    with open(filepath, "w", encoding="utf-8") as f:
+        f.write(content)
 
-   # Build file content, no fancy shit
-   content = f"URL: {url}\n"
-   content += f"Title: {data.get('Title', 'No title')}\n"
-   content += f"HTML length: {data.get('HTML length', 'N/A')}\n\n"
-   content += "=== HTML Code ===\n"
-   content += data.get('HTML code', '') + "\n\n"
-   content += "=== Text Content ===\n"
-   content += data.get('Text content', '') + "\n\n"
-   content += "=== Links ===\n"
-   content += "\n".join(data.get('Links', [])) + "\n"
+def cleanup_other_shit(selected_url, all_urls):
+    valid_files = {safe_filename(url) for url in all_urls}
+    for filename in os.listdir(SAVE_DIR):
+        if filename not in valid_files:
+            path = os.path.join(SAVE_DIR, filename)
+            try:
+                os.remove(path)
+                print(f"[DEBUG] Deleted file {path}")
+            except Exception as e:
+                print(f"Error deleting file {path}: {e}")
 
-   with open(filepath, "w", encoding="utf-8") as f:
-       f.write(content)
-   print(f"[DEBUG] Saved scraped data to {filepath}")
-
-def cleanup_other_files(selected_url, all_urls):
-   """Trash files for URLs you ain’t checking."""
-   valid_files = {safe_filename(url) for url in all_urls}
-   for filename in os.listdir(SAVE_DIR):
-       if filename not in valid_files:
-           path = os.path.join(SAVE_DIR, filename)
-           try:
-               os.remove(path)
-               print(f"[DEBUG] Deleted file {path}")
-           except Exception as e:
-               print(f"Error deleting file {path}: {e}")
-
-def scrape_page(url, headers=None, retry=3, delay=2):
-   if headers is None:
-       headers = {
-           "User-agent": "CAM_WithaPrettyCoolScraper:D",
-           "X-Greeting": "Hi from your friendly scrapper! excuse me if i spam, im new ot python! :D",
-           "From": "A random freshman goober... :D.test",
-       }
-
-   tries = 0
-   while tries < retry:
-       try:
-           response = requests.get(url, headers=headers, timeout=10, allow_redirects=True)
-           response.raise_for_status()
-           return response.text
-       except requests.RequestException as e:
-           tries += 1
-           print(f"Request failed for {url} (try {tries}/{retry}): {e}")
-           if tries < retry:
-               print(f"Retrying in {delay} seconds... chill")
-               time.sleep(delay)
-           else:
-               print("Giving up. This site sucks or you do.")
-               return None
+def scrape_page(url, headers=None, retry=3, delay=0.25):
+    req_headers = session.headers.copy()
+    if headers:
+        req_headers.update(headers)
+    tries = 0
+    while tries < retry:
+        try:
+            response = session.get(url, headers=req_headers, timeout=10, allow_redirects=True)
+            response.raise_for_status()
+            return response.text
+        except requests.RequestException as e:
+            tries += 1
+            clear_screen()
+            print(f"{BOLD}{RED}Request failed for {url} (try {tries}/{retry}): {e}{RESET}")
+            if tries < retry:
+                time.sleep(delay)
+            else:
+                return None
 
 def parse_page(html, base_url):
-   soup = BeautifulSoup(html, 'html.parser')
+    soup = BullShit4(html, 'html.parser')
+    tit = soup.title.string.strip() if soup.title and soup.title.string else 'No title found'
+    html_length = len(html)
 
-   title = soup.title.string.strip() if soup.title and soup.title.string else 'No title found'
-   html_length = len(html)
+    for s in soup(['script', 'style', 'noscript']):
+        s.decompose()
+    text_content = '\n'.join([l.strip() for l in soup.get_text(separator='\n').splitlines() if l.strip()])
 
-   # Strip scripts and crap, leave only visible text
-   for script_or_style in soup(['script', 'style', 'noscript']):
-       script_or_style.decompose()  # Get rid of annoying shit
-   text_content = soup.get_text(separator='\n')
+    links = []
+    for a in soup.find_all('a', href=True):
+        href = urljoin(base_url, a['href'])
+        parsed = urlparse(href)
+        if parsed.scheme in ('http', 'https'):
+            links.append(href)
 
-   # Clean blank lines so it’s not a mess
-   lines = [line.strip() for line in text_content.splitlines()]
-   lines = [line for line in lines if line]
-   clean_text = '\n'.join(lines)
+    features = []
+    feature_sections = soup.find_all(['ul', 'div'], class_=['features-list', 'feature-list', 'features', 'feature'])
+    for section in feature_sections:
+        for li in section.find_all('li'):
+            text = li.get_text(strip=True)
+            if text and text not in features:
+                features.append(text)
 
-   links = []
-   for a in soup.find_all('a', href=True):
-       href = urljoin(base_url, a['href'])
-       links.append(href)
+    images = []
+    for img in soup.find_all('img', src=True):
+        img_url = urljoin(base_url, img['src'])
+        images.append(img_url)
 
-   features = []
-   feature_sections = soup.find_all(['ul', 'div'], class_=['features-list', 'feature-list', 'features', 'feature'])
-   if feature_sections:
-       for section in feature_sections:
-           for li in section.find_all('li'):
-               text = li.get_text(strip=True)
-               if text and text not in features:
-                   features.append(text)
-   else:
-       for div in soup.find_all('div', class_=lambda x: x and 'feature' in x):
-           for li in div.find_all('li'):
-               text = li.get_text(strip=True)
-               if text and text not in features:
-                   features.append(text)
+    metas = {}
+    for meta in soup.find_all('meta'):
+        name = meta.get('name', '').lower()
+        if name and 'content' in meta.attrs:
+            metas[name] = meta['content']
 
-   images = []
-   for img in soup.find_all('img', src=True):
-       img_url = urljoin(base_url, img['src'])
-       filename = get_filename_from_url(img_url)
-       if filename and filename not in images:
-           images.append(filename)
+    headings = {}
+    for level in range(1, 7):
+        tag = f'h{level}'
+        headings[tag] = [h.get_text(strip=True) for h in soup.find_all(tag)]
 
-   metas = {}
-   for meta in soup.find_all('meta'):
-       name = meta.get('name', '').lower()
-       if name and 'content' in meta.attrs:
-           metas[name] = meta['content']
-
-   headings = {}
-   for level in range(1, 7):
-       tag = f'h{level}'
-       headings[tag] = [h.get_text(strip=True) for h in soup.find_all(tag)]
-
-   return {
-       'Title': title,
-       'HTML length': html_length,
-       'HTML code': html,
-       'Text content': clean_text,
-       'Links': links,
-       'Features': features,
-       'Images (filenames)': images,
-       'Meta tags': metas,
-       'Headings': headings,
-   }
-
-def confirm_long_display(key):
-   while True:
-       confirm = delayed_input(f"\n'{key}' can be pretty damn long. Show it? (yes/no): ").strip().lower()
-       if confirm in ('yes', 'y'):
-           return True
-       elif confirm in ('no', 'n'):
-           return False
-       else:
-           print("Say 'yes' or 'no', dumbass.")
+    return {
+        'Tit': tit,
+        'HTML length': html_length,
+        'HTML code': html,
+        'Text content': text_content,
+        'Links': links,
+        'Features': features,
+        'Images (filenames)': images,
+        'Meta tags': metas,
+        'Headings': headings,
+    }
 
 def show_data(key, value):
-   clear_screen()
-   print(f"\n{key}:")
-   if isinstance(value, list):
-       if not value:
-           print("  (Nothing here, bro)")
-           return
-       for i, item in enumerate(value[:20], 1):
-           print(f"  {i}. {item}")
-       if len(value) > 20:
-           print(f"  ... and {len(value) - 20} more")
-   elif isinstance(value, dict):
-       if not value:
-           print("  (Nada here)")
-           return
-       for k, v in value.items():
-           if isinstance(v, list):
-               print(f"  {k} ({len(v)} items):")
-               for i, item in enumerate(v[:10], 1):
-                   print(f"    {i}. {item}")
-               if len(v) > 10:
-                   print(f"    ... and {len(v) - 10} more")
-           else:
-               print(f"  {k}: {v}")
-   else:
-       if key.lower() == 'html length':
-           print(f"  {value} characters")
-       elif key.lower() in ('html code', 'text content'):
-           if confirm_long_display(key):
-               print(value)
-           else:
-               print("  (Skipped showing that crap.)")
-       else:
-           print(f"  {value}")
-
-def print_all(data):
-   clear_screen()
-   print("\n=== ALL SCRAPED DATA ===")
-   for key, value in data.items():
-       show_data(key, value)
-   print("="*30)
+    clear_screen()
+    print(f"\n{key}:")
+    if isinstance(value, list):
+        if not value:
+            print("  (Nothing here)")
+            return
+        for i, item in enumerate(value[:20], 1):
+            print(f"  {i}. {BLUE}{item}{RESET}")
+        if len(value) > 20:
+            print(f"  ... and {len(value) - 20} more")
+    elif isinstance(value, dict):
+        for k, v in value.items():
+            print(f"  {k}: {v}")
+    else:
+        print(f"  {value}")
 
 def display_data_menu(data, url, all_urls):
-   """Pick what part of data you wanna see."""
-   keys = [k for k in data.keys() if k != 'Title']  # Title ain’t in menu
-   print("\nStuff you can check on this page:")
-   for i, key in enumerate(keys, 1):
-       count = len(data[key]) if isinstance(data[key], list) else 1
-       print(f"{i}. {key} ({count} items)")
+    keys = [k for k in data.keys() if k != 'Tit']
+    save_scraped_data_to_file(url, data)
+    cleanup_other_shit(url, all_urls)
 
-   print("Type 'all' to see everything.")
-   print("Type 'back' to go back to URL list.")
+    while True:
+        clear_screen()
+        print(f"\nPage: {data.get('Tit', 'No title')}")
+        print("Check page data:")
+        for i, key in enumerate(keys, 1):
+            print(f"  {i}. {key}")
+        print("Type 'back' to go back to URL list")
 
-   save_scraped_data_to_file(url, data)  # Save when viewing, cuz why not
-   cleanup_other_files(url, all_urls)    # Clean old shit
+        choice = delayed_input("Pick a number: ").strip().lower()
 
-   while True:
-       choice = delayed_input("Your choice: ").strip().lower()
+        if choice == 'back':
+            return
 
-       if choice == 'all':
-           data_no_title = {k: v for k, v in data.items() if k != 'Title'}
-           print_all(data_no_title)
-           delayed_input("\nPress Enter to get back...")
-           clear_screen()
-           print("\nBack to data menu.")
-           for i, key in enumerate(keys, 1):
-               count = len(data[key]) if isinstance(data[key], list) else 1
-               print(f"{i}. {key} ({count} items)")
-           print("Type 'all' to see everything.")
-           print("Type 'back' to go back.")
-           continue
+        if choice.isdigit() and 1 <= int(choice) <= len(keys):
+            key = keys[int(choice)-1]
+            show_data(key, data[key])
+            delayed_input("\nPress Enter to return to the page menu...")
+        else:
+            print("Invalid choice.")
+            delayed_input("Press Enter to try again...")
 
-       if choice == 'back':
-           return  # Back to URL list
+def show_crawled_data(alltheshit):
+    urls = list(alltheshit.keys())
+    while True:
+        clear_screen()
+        print("=== Crawled URLs ===")
+        for i, u in enumerate(urls, 1):
+            print(f"{i}. {BLUE}{alltheshit[u].get('Tit', 'No title')}{RESET}")
+        choice = delayed_input("Number to check URL, or 'quit': ").strip().lower()
+        if choice == 'quit':
+            break
+        if choice.isdigit() and 1 <= int(choice) <= len(urls):
+            url = urls[int(choice)-1]
+            display_data_menu(alltheshit[url], url, urls)
 
-       if choice.isdigit():
-           choice_num = int(choice)
-           if 1 <= choice_num <= len(keys):
-               key = keys[choice_num - 1]
-               show_data(key, data[key])
-               delayed_input("\nPress Enter to get back...")
-               clear_screen()
-               print("\nBack to data menu.")
-               for i, key in enumerate(keys, 1):
-                   count = len(data[key]) if isinstance(data[key], list) else 1
-                   print(f"{i}. {key} ({count} items)")
-               print("Type 'all' to see everything.")
-               print("Type 'back' to go back.")
-               continue
-           else:
-               print("Dude, that number ain't valid.")
-               continue
+def fetch_url(url):
+    html = scrape_page(url)
+    if not html:
+        return url, None
+    data = parse_page(html, url)
+    return url, data
 
-       matching_keys = [k for k in keys if k.lower() == choice]
-       if matching_keys:
-           key = matching_keys[0]
-           show_data(key, data[key])
-           delayed_input("\nPress Enter to get back...")
-           clear_screen()
-           print("\nBack to data menu.")
-           for i, key in enumerate(keys, 1):
-               count = len(data[key]) if isinstance(data[key], list) else 1
-               print(f"{i}. {key} ({count} items)")
-           print("Type 'all' to see everything.")
-           print("Type 'back' to go back.")
-           continue
+def crawl(start_url, max_depth):
+    visited = set()
+    to_visit = [(start_url, 0)]
+    alltheshit = {}
 
-       print("Invalid choice, try a number, name, 'all', or 'back'.")
+    while to_visit:
+        current_layer = to_visit
+        to_visit = []
 
-def show_crawled_data(all_data, display_title_in_list=False):
-   urls = list(all_data.keys())
-   while True:
-       clear_screen()
-       print("\n=== Crawled URLs ===")
-       for i, u in enumerate(urls, 1):
-           title = all_data[u].get('Title', 'No title')
-           if display_title_in_list:
-               print(f"{i}. {title}  --  {u}")
-           else:
-               print(f"{i}. {u}  --  {title}")
+        batch_size = 20
+        for i in range(0, len(current_layer), batch_size):
+            batch = current_layer[i:i+batch_size]
+            with ThreadPoolExecutor(max_workers=3) as executor:
+                future_to_url = {executor.submit(fetch_url, url): (url, depth) for url, depth in batch if url not in visited and depth <= max_depth}
+                for future in as_completed(future_to_url):
+                    url, depth = future_to_url[future]
+                    try:
+                        url, data = future.result()
+                    except Exception as e:
+                        print(f"{BOLD}{RED}Error fetching {url}: {e}{RESET}", end='\r')
+                        visited.add(url)
+                        continue
 
-       print("Type the number to check a URL, or 'quit' to bail.")
-       choice = delayed_input("Choice: ").strip().lower()
+                    print(f"{BOLD}Scraped (depth {depth}){BLUE}: {url}{RESET}    ", end='\n')
 
-       if choice == 'quit':
-           break
-
-       if choice.isdigit():
-           choice_num = int(choice)
-           if 1 <= choice_num <= len(urls):
-               url = urls[choice_num - 1]
-               data = all_data[url]
-               display_data_menu(data, url, urls)  # Show data for that URL
-           else:
-               print("Number’s not right.")
-               delayed_input("Press Enter to continue...")
-       else:
-           print("Invalid input.")
-           delayed_input("Press Enter to continue...")
+                    visited.add(url)
+                    if data:
+                        alltheshit[url] = data
+                        if depth < max_depth:
+                            for link in data['Links']:
+                                if link not in visited and all(link != u for u, _ in to_visit):
+                                    to_visit.append((link, depth + 1))
+    print()
+    return alltheshit
 
 def main():
-   print("Welcome to my sh*tty scraper")
-
-   while True:
-       url = delayed_input("\nEnter URL to scrape (or 'quit' to go back): ").strip()
-       if url.lower() == 'quit':
-           print("You suck")
-           break
-
-       use_title = delayed_input("Show page as title? (Y/n): ").strip().lower()
-       display_title_in_list = (use_title in ('y', 'yes', ''))
-
-       max_depth = delayed_input("Crawl depth (0 = just this page): ").strip()
-       try:
-           max_depth = int(max_depth)
-           if max_depth < 0:
-               print("Depth can't be negative, setting to 0.")
-               max_depth = 0
-       except ValueError:
-           print("Invalid number, using 0.")
-           max_depth = 0
-
-       all_data = crawl(url, max_depth)
-       if not all_data:
-           print("No data scraped, that sucks ¯\\_(ツ)_/¯")
-           continue
-
-       show_crawled_data(all_data, display_title_in_list=display_title_in_list)
-
-def crawl(url, max_depth):
-   visited = set()
-   to_visit = [(url, 0)]
-   all_data = {}
-
-   while to_visit:
-       current_url, depth = to_visit.pop(0)
-       if current_url in visited or depth > max_depth:
-           continue
-       print(f"\nScraping (depth {depth}): {current_url}")
-       html = scrape_page(current_url)
-       if not html:
-           print(f"Failed to get {current_url}")
-           visited.add(current_url)
-           continue
-       data = parse_page(html, current_url)
-       all_data[current_url] = data
-       visited.add(current_url)
-
-       if depth < max_depth:
-           for link in data['Links']:
-               if link not in visited and urlparse(link).scheme in ('http', 'https'):
-                   to_visit.append((link, depth + 1))
-   return all_data
+    print("Welcome to the full-featured scraper") #its pretty shit but still works
+    while True:
+        url = delayed_input("\nEnter URL to scrape (or 'quit'): ").strip()
+        if url.lower() == 'quit':
+            break
+        depth = delayed_input("Crawl depth (0 = just this page): ").strip()
+        try:
+            depth = int(depth)
+            if depth < 0: depth = 0
+        except ValueError:
+            depth = 0
+        alltheshit = crawl(url, depth)
+        if alltheshit:
+            show_crawled_data(alltheshit)
+        else:
+            print("No data scraped.")
 
 if __name__ == "__main__":
-   main()
+    main()
