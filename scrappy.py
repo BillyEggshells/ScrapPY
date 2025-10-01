@@ -1,21 +1,18 @@
 import os
-import requests
-from bs4 import BeautifulSoup as BullShit4
+import sys
+import asyncio
+import aiohttp
 from urllib.parse import urljoin, urlparse
-import time
-import hashlib as hashemeroids
-from concurrent.futures import ThreadPoolExecutor, as_completed
-import shutil
+from selectolax.parser import HTMLParser
+import functools
 
-SAVE_DIR = "scraped_texts"
-os.makedirs(SAVE_DIR, exist_ok=True)
+# ---------------- Constants ----------------
+OUTPUT_FILE = "LotsOfF*ckingData.txt"
+MAX_BUFFER = 1000
+URL_FETCHERS = 20  # number of URL extraction workers
+INFO_WORKERS = 40  # number of info extraction workers
+PRINT_WORKERS = 6  # number of print workers for smooth output
 
-numofshitcollected = 1
-totalshitcollected = 1
-MAX_BUFFER = 50  # Number of scrapes before dumping
-MAX_FILE_SIZE = 10 * 1024 * 1024  # 10 MB per file
-
-# Terminal colors
 RED = '\033[38;5;196m'
 BLUE = "\033[34m"
 RESET = '\033[0m'
@@ -23,117 +20,231 @@ BOLD = '\033[1m'
 ORANGE = '\033[33m'
 GREEN = '\033[32m'
 
-session = requests.Session()
-session.headers.update({
-    "User-agent": "CAM_WithaPrettyCoolScraper:D",
-    "X-Greeting": "Hi",
-    "From": "A random freshman goober... :D.test",
-})
+# ---------------- Clear Screen (full) ----------------
+def clear_screen():
+    os.system('cls' if os.name == 'nt' else 'clear')
 
-def hide():
-    print("\033[?25l", end="")
+# ---------------- Smart line-clear print ----------------
+last_message_lines = 0
 
-def show():
-    print("\033[?25h", end="")
+def clear_last_message():
+    global last_message_lines
+    for _ in range(last_message_lines):
+        sys.stdout.write('\x1b[1A')  # Move cursor up one line
+        sys.stdout.write('\x1b[2K')  # Clear entire line
+    sys.stdout.flush()
+    last_message_lines = 0
 
-def safe_filename(url):
-    h = hashemeroids.sha256(url.encode()).hexdigest()
-    return f"{h}.txt"
+def print_status(message):
+    global last_message_lines
+    clear_last_message()
+    print(message, end='', flush=True)
+    last_message_lines = message.count('\n') + 1
 
-def get_dump_filename():
-    existing_files = sorted(
-        [f for f in os.listdir(SAVE_DIR) if f.startswith("all_scraped_data") and f.endswith(".txt")]
-    )
-    if existing_files:
-        last_file = os.path.join(SAVE_DIR, existing_files[-1])
-        if os.path.getsize(last_file) < MAX_FILE_SIZE:
-            return last_file
-    new_file = os.path.join(SAVE_DIR, f"all_scraped_data_{int(time.time())}.txt")
-    return new_file
+# ---------------- Fast Parser using selectolax ----------------
+def parse_links(html, base_url):
+    tree = HTMLParser(html)
+    links = []
+    for a in tree.css('a[href]'):
+        href = a.attributes.get('href')
+        if href:
+            full_url = urljoin(base_url, href)
+            scheme = urlparse(full_url).scheme
+            if scheme in ('http', 'https'):
+                links.append(full_url)
+    return links
 
-def dump_all_data(alltheshit):
-    dump_filename = get_dump_filename()
-    print(f"{BOLD}{ORANGE}Dumping data into {dump_filename}{RESET}")
-    with open(dump_filename, "a", encoding="utf-8") as dump_file:
-        for url, data in alltheshit.items():
-            dump_file.write(f"URL: {url}\nTit: {data.get('Tit', 'No title')}\nHTML length: {data.get('HTML length', 'N/A')}\n\n")
-            dump_file.write("=== HTML Code ===\n" + data.get('HTML code', '') + "\n\n")
-            dump_file.write("=== Text Content ===\n" + data.get('Text content', '') + "\n\n")
-            dump_file.write("=== Links ===\n" + "\n".join(data.get('Links', [])) + "\n")
-            dump_file.write("=== Features ===\n" + "\n".join(data.get('Features', [])) + "\n")
-            dump_file.write("=== Images ===\n" + "\n".join(data.get('Images (filenames)', [])) + "\n")
-            dump_file.write("=== Meta Tags ===\n" + "\n".join(f"{k}: {v}" for k,v in data.get('Meta tags', {}).items()) + "\n")
-            dump_file.write("\n" + "="*40 + "\n\n")
-    print(f"{BOLD}{GREEN}Done, continuing{RESET}")
-    time.sleep(0.75)
-    alltheshit.clear()
-    print(f"{BOLD}{GREEN}Memory cleared, continuing...{RESET}")
-
-def scrape_page(url, headers=None):
-    req_headers = session.headers.copy()
-    if headers:
-        req_headers.update(headers)
-    try:
-        response = session.get(url, headers=req_headers, timeout=10)
-        response.raise_for_status()
-        return response.text
-    except requests.RequestException:
-        return None
-
-def parse_page(html, base_url):
-    soup = BullShit4(html, 'html.parser')
-    prettified_html = soup.prettify()
-    tit = soup.title.string.strip() if soup.title and soup.title.string else 'No title found'
+def parse_full_page(html, base_url):
+    tree = HTMLParser(html)
+    
+    title_node = tree.css_first('title')
+    tit = title_node.text(strip=True) if title_node else 'No title found'
     html_length = len(html)
-    for s in soup(['script', 'style', 'noscript']):
-        s.decompose()
-    text_content = '\n'.join([l.strip() for l in soup.get_text(separator='\n').splitlines() if l.strip()])
 
-    links, features, images, metas, headings = [], [], [], {}, {}
-    for a in soup.find_all('a', href=True):
-        href = urljoin(base_url, a['href'])
-        parsed = urlparse(href)
-        if parsed.scheme in ('http', 'https'):
-            links.append(href)
+    for node in tree.css('script, style, noscript'):
+        node.decompose()
 
-    feature_sections = soup.find_all(['ul', 'div'], class_=['features-list', 'feature-list', 'features', 'feature'])
-    for section in feature_sections:
-        for li in section.find_all('li'):
-            text = li.get_text(strip=True)
-            if text and text not in features:
+    text_content = '\n'.join(
+        line.strip() for line in tree.text(separator='\n').splitlines() if line.strip()
+    )
+
+    features = []
+    feature_set = set()
+    for section in tree.css('ul.features-list, ul.feature-list, ul.features, ul.feature, div.features-list, div.feature-list, div.features, div.feature'):
+        for li in section.css('li'):
+            text = li.text(strip=True)
+            if text and text not in feature_set:
+                feature_set.add(text)
                 features.append(text)
 
-    for img in soup.find_all('img', src=True):
-        img_url = urljoin(base_url, img['src'])
-        images.append(img_url)
+    images = []
+    for img in tree.css('img[src]'):
+        src = img.attributes.get('src')
+        if src:
+            images.append(urljoin(base_url, src))
 
-    for meta in soup.find_all('meta'):
-        name = meta.get('name', '').lower()
-        if name and 'content' in meta.attrs:
-            metas[name] = meta['content']
+    metas = {}
+    for meta in tree.css('meta[name][content]'):
+        name = meta.attributes.get('name', '').lower()
+        content = meta.attributes.get('content', '')
+        if name and content:
+            metas[name] = content
 
-    for level in range(1, 7):
-        tag = f'h{level}'
-        headings[tag] = [h.get_text(strip=True) for h in soup.find_all(tag)]
+    headings = {}
+    for i in range(1, 7):
+        headings[f'h{i}'] = [h.text(strip=True) for h in tree.css(f'h{i}')]
 
     return {
         'Tit': tit,
         'HTML length': html_length,
-        'HTML code': prettified_html,
+        'HTML code': html,
         'Text content': text_content,
-        'Links': links,
         'Features': features,
         'Images (filenames)': images,
         'Meta tags': metas,
         'Headings': headings,
     }
 
-def delayed_input(prompt):
-    return input(prompt)
+# ---------------- Efficient Async Write ----------------
+def _write_to_file(data_batch):
+    with open(OUTPUT_FILE, "a", encoding="utf-8") as f:
+        for url, data in data_batch.items():
+            f.write(f"URL: {url}\nTit: {data.get('Tit', 'No title')}\nHTML length: {data.get('HTML length', 'N/A')}\n\n")
+            f.write("=== HTML Code ===\n" + data.get('HTML code', '') + "\n\n")
+            f.write("=== Text Content ===\n" + data.get('Text content', '') + "\n\n")
+            f.write("=== Features ===\n" + "\n".join(data.get('Features', [])) + "\n")
+            f.write("=== Images ===\n" + "\n".join(data.get('Images (filenames)', [])) + "\n")
+            f.write("=== Meta Tags ===\n" + "\n".join(f"{k}: {v}" for k, v in data.get('Meta tags', {}).items()) + "\n")
+            f.write("=== Headings ===\n")
+            for level, texts in data.get('Headings', {}).items():
+                f.write(f"{level}:\n")
+                for text in texts:
+                    f.write(f"  {text}\n")
+            f.write("\n" + "="*40 + "\n\n")
 
-def clear_screen():
-    os.system('clear')
+async def dump_all_data(all_data):
+    print_status(f"{BOLD}{ORANGE}Dumping data into {OUTPUT_FILE}{RESET}\n")
+    loop = asyncio.get_running_loop()
+    await loop.run_in_executor(None, functools.partial(_write_to_file, all_data))
+    all_data.clear()
+    print_status(f"{BOLD}{GREEN}Memory cleared, continuing...{RESET}\n")
 
+# ---------------- Async Fetch ----------------
+async def fetch(session, url):
+    headers = {
+        "User-Agent": "CAM_WithaPrettyCoolScraper:D",
+        "X-Greeting": "Hi",
+        "From": "A random freshman goober... :D.test",
+    }
+    try:
+        async with session.get(url, headers=headers, timeout=10) as response:
+            response.raise_for_status()
+            return await response.text()
+    except Exception:
+        return None
+
+# ---------------- URL Fetcher Worker ----------------
+async def url_fetcher(name, session, url_queue, info_queue, visited, max_depth):
+    while True:
+        try:
+            url, depth = await asyncio.wait_for(url_queue.get(), timeout=10)
+        except asyncio.TimeoutError:
+            break
+
+        html = await fetch(session, url)
+        if html:
+            links = parse_links(html, url)
+            if depth < max_depth:
+                for link in links:
+                    if link not in visited:
+                        visited.add(link)
+                        await url_queue.put((link, depth + 1))
+                        await info_queue.put((link, depth + 1))
+            await info_queue.put((url, depth))
+        url_queue.task_done()
+
+# ---------------- Info Worker ----------------
+async def info_worker(name, session, info_queue, all_data, link_counter, print_queue):
+    while True:
+        try:
+            url, depth = await asyncio.wait_for(info_queue.get(), timeout=15)
+        except asyncio.TimeoutError:
+            break
+
+        html = await fetch(session, url)
+        if html:
+            data = parse_full_page(html, url)
+            all_data[url] = data
+            link_counter[0] += 1
+
+            msg = (
+                f"{BOLD}{ORANGE}[{link_counter[0]}]{RESET}{BOLD}{GREEN} (depth {depth}): {RESET}"
+                f"{BOLD}{BLUE}{url}{RESET}\n"
+            )
+            await print_queue.put(msg)
+
+            if link_counter[0] >= MAX_BUFFER:
+                await dump_all_data(all_data)
+                link_counter[0] = 0
+        info_queue.task_done()
+
+# ---------------- Print Worker ----------------
+async def print_worker(name, print_queue):
+    while True:
+        try:
+            message = await asyncio.wait_for(print_queue.get(), timeout=30)
+        except asyncio.TimeoutError:
+            break
+        print_status(message)
+        print_queue.task_done()
+
+# ---------------- Main Crawl Function ----------------
+async def crawl(start_url, max_depth):
+    if os.path.exists(OUTPUT_FILE):
+        os.remove(OUTPUT_FILE)
+
+    visited = set([start_url])
+    url_queue = asyncio.Queue()
+    info_queue = asyncio.Queue()
+    print_queue = asyncio.Queue()
+    all_data = {}
+    link_counter = [0]
+
+    await url_queue.put((start_url, 0))
+    await info_queue.put((start_url, 0))
+
+    conn = aiohttp.TCPConnector(limit=None, ttl_dns_cache=300)
+    timeout = aiohttp.ClientTimeout(total=60)
+    async with aiohttp.ClientSession(connector=conn, timeout=timeout) as session:
+        url_fetchers = [
+            asyncio.create_task(url_fetcher(i+1, session, url_queue, info_queue, visited, max_depth))
+            for i in range(URL_FETCHERS)
+        ]
+
+        info_workers = [
+            asyncio.create_task(info_worker(i+1, session, info_queue, all_data, link_counter, print_queue))
+            for i in range(INFO_WORKERS)
+        ]
+
+        print_workers = [
+            asyncio.create_task(print_worker(i+1, print_queue))
+            for i in range(PRINT_WORKERS)
+        ]
+
+        await url_queue.join()
+        await info_queue.join()
+        await print_queue.join()
+
+        for task in url_fetchers + info_workers + print_workers:
+            task.cancel()
+        await asyncio.gather(*url_fetchers, *info_workers, *print_workers, return_exceptions=True)
+
+        if all_data:
+            await dump_all_data(all_data)
+
+        return all_data  # <-- return data for interactive viewing
+
+# ---------------- Interactive display functions ----------------
 def show_data(key, value):
     clear_screen()
     print(f"\n{key}:")
@@ -146,166 +257,78 @@ def show_data(key, value):
         if len(value) > 20:
             print(f"  ... and {len(value) - 20} more")
     elif isinstance(value, dict):
+        if not value:
+            print("  (Nothing here)")
+            return
         for k, v in value.items():
             print(f"  {k}: {v}")
     else:
         print(f"  {value}")
 
-def load_dumped_data():
-    alltheshit = {}
-    dump_files = sorted(f for f in os.listdir(SAVE_DIR) if f.startswith("all_scraped_data") and f.endswith(".txt"))
-    if not dump_files:
-        return alltheshit
-
-    for dump_file_name in dump_files:
-        dump_file_path = os.path.join(SAVE_DIR, dump_file_name)
-        with open(dump_file_path, "r", encoding="utf-8") as dump_file:
-            dump_content = dump_file.read().split("\n" + "="*40 + "\n\n")
-            for section in dump_content:
-                if not section.strip():
-                    continue
-                lines = section.splitlines()
-                try:
-                    url = lines[0].split(": ", 1)[1]
-                    tit = lines[1].split(": ", 1)[1]
-                    html_length = lines[2].split(": ", 1)[1]
-
-                    html_start = lines.index("=== HTML Code ===") + 1
-                    text_start = lines.index("=== Text Content ===")
-                    links_start = lines.index("=== Links ===")
-                    features_start = lines.index("=== Features ===")
-                    images_start = lines.index("=== Images ===")
-                    meta_start = lines.index("=== Meta Tags ===")
-
-                    data = {
-                        'Tit': tit,
-                        'HTML length': html_length,
-                        'HTML code': "\n".join(lines[html_start:text_start]),
-                        'Text content': "\n".join(lines[text_start+1:links_start]),
-                        'Links': [l.strip() for l in lines[links_start+1:features_start]],
-                        'Features': [f.strip() for f in lines[features_start+1:images_start]],
-                        'Images (filenames)': [i.strip() for i in lines[images_start+1:meta_start]],
-                        'Meta tags': {k.split(": ", 1)[0]: k.split(": ", 1)[1] for k in lines[meta_start+1:] if ": " in k},
-                    }
-                    alltheshit[url] = data
-                except Exception as e:
-                    print(f"{RED}Failed to parse section in {dump_file_name}:{RESET} {e}")
-    return alltheshit
-
-def display_data_menu(data, url, urls):
+def display_data_menu(data):
     keys = list(data.keys())
     while True:
         clear_screen()
-        print(f"Viewing: {BLUE}{url}{RESET}")
-        for i, k in enumerate(keys, 1):
-            print(f"{i}. {k}")
-        print("0. Back")
-        choice = delayed_input("Select field to view: ").strip()
+        print("=== Crawled URLs ===")
+        for i, url in enumerate(keys, 1):
+            print(f"{BOLD}{ORANGE}{i}: {BLUE}{url}{RESET}")
+        print("0. Back/Quit")
+
+        choice = input("Number to check URL (or 0 to quit): ").strip()
         if choice == '0':
             break
         if choice.isdigit() and 1 <= int(choice) <= len(keys):
-            show_data(keys[int(choice)-1], data[keys[int(choice)-1]])
-            delayed_input("\nPress Enter to continue...")
+            url = keys[int(choice)-1]
+            fields = list(data[url].keys())
+            while True:
+                clear_screen()
+                print(f"Viewing data for: {BLUE}{url}{RESET}\n")
+                for i, field in enumerate(fields, 1):
+                    print(f"{i}. {field}")
+                print("0. Back")
 
-def show_crawled_data(alltheshit=None):
-    alltheshit = load_dumped_data()
-    if not alltheshit:
-        print(f"{RED}No dumped data found.{RESET}")
-        return
+                field_choice = input("Select field to view: ").strip()
+                if field_choice == '0':
+                    break
+                if field_choice.isdigit() and 1 <= int(field_choice) <= len(fields):
+                    field = fields[int(field_choice)-1]
+                    show_data(field, data[url][field])
+                    input("\nPress Enter to continue...")
 
-    urls = list(alltheshit.keys())
-    while True:
-        clear_screen()
-        print("=== Crawled URLs ===")
-        for i, u in enumerate(urls, 1):
-            print(f"{i}. {BLUE}{alltheshit[u].get('Tit', 'No title')}{RESET}")
-        choice = delayed_input("Number to check URL, or 'quit': ").strip().lower()
-        show()
-        if choice == 'quit':
-            break
-        if choice.isdigit() and 1 <= int(choice) <= len(urls):
-            url = urls[int(choice)-1]
-            display_data_menu(alltheshit[url], url, urls)
-
-def fetch_url(url):
-    html = scrape_page(url)
-    if not html:
-        return url, None
-    data = parse_page(html, url)
-    return url, data
-
-def crawl(start_url, max_depth):
-    hide()
-    global numofshitcollected
-    global totalshitcollected
-    visited = set()
-    to_visit = {(start_url, 0)}
-    alltheshit = {}
-
-    with ThreadPoolExecutor(max_workers=10) as executor:
+# ---------------- Main Entry Point ----------------
+async def main():
+    print("Welcome to the mega-optimized async scraper with separated workers\n")
+    try:
         while True:
-            current_layer = list(to_visit)
-            to_visit.clear()
-
-            future_to_url = {}
-            for url, depth in current_layer:
-                if url not in visited and depth <= max_depth:
-                    future = executor.submit(fetch_url, url)
-                    future_to_url[future] = (url, depth)
-
-            if not future_to_url:
-                # No URLs to fetch, wait a bit before retrying to avoid busy loop
-                time.sleep(3)
+            url = input("Enter URL to scrape: ").strip()
+            if not url:
                 continue
 
-            for future in as_completed(future_to_url, timeout=300):
-                url, depth = future_to_url[future]
-                try:
-                    fetched_url, data = future.result()
-                except Exception as e:
-                    print(f"{RED}Error fetching {url}: {e}{RESET}", end='\r')
-                    visited.add(url)
-                    continue
-                clear_screen()
-                print(f"{BOLD}Current DIR: {RED}{numofshitcollected}{RESET}{BOLD}, Total: {RED}{totalshitcollected}{RESET}{BOLD} (depth {depth}):{BLUE} {url}{RESET}")
-                numofshitcollected += 1
-                totalshitcollected += 1
-                visited.add(url)
-                if data:
-                    alltheshit[url] = data
-                    if len(alltheshit) >= MAX_BUFFER:
-                        dump_all_data(alltheshit)
-                        numofshitcollected = 1
-                    if depth < max_depth:
-                        for link in data['Links']:
-                            if link not in visited and all(link != u for u, _ in to_visit):
-                                to_visit.add((link, depth + 1))
-            # After each batch, dump data if any
-            if alltheshit:
-                dump_all_data(alltheshit)
-
-def main():
-    try:
-        print("Welcome to the full-featured scraper")
-        while True:
-            url = delayed_input("\nEnter URL to scrape (or 'quit'): ").strip()
-            if url.lower() == 'quit':
-                break
-            depth = delayed_input("Crawl depth (0 = just this page): ").strip()
+            depth_str = input("Crawl depth (0 = just this page): ").strip()
             try:
-                depth = int(depth)
+                depth = int(depth_str)
                 if depth < 0:
                     depth = 0
-            except ValueError:
+            except:
                 depth = 0
-            if url:
-                crawl(url, depth)
-                show_crawled_data()
-    finally:
-        print(f"{RED}{BOLD}Deleting all scraped files...{RESET}")
-        if os.path.exists(SAVE_DIR):
-            shutil.rmtree(SAVE_DIR)
-        print(f"{GREEN}{BOLD}Scraped files cleared{RESET}")
+
+            clear_screen()
+            print(f"Starting crawl on {url} with depth {depth}...\n")
+            all_data = await crawl(url, depth)
+
+            if all_data:
+                print(f"\n{GREEN}Crawl finished! Press Enter to view data or Ctrl+C to quit.{RESET}\n")
+                input()
+                display_data_menu(all_data)
+
+            print(f"\n{GREEN}Done viewing data. Press Enter to start another or Ctrl+C to quit.{RESET}\n")
+            input()
+
+    except KeyboardInterrupt:
+        print(f"\n\n{RED}{BOLD}KeyboardInterrupt received. Deleting scraped output file...{RESET}")
+        if os.path.exists(OUTPUT_FILE):
+            os.remove(OUTPUT_FILE)
+        print(f"{GREEN}{BOLD}Scraped file deleted. Goodbye!{RESET}")
 
 if __name__ == "__main__":
-    main()
+    asyncio.run(main())
